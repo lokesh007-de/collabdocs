@@ -8,7 +8,8 @@ import { requireAuth } from "../middleware/auth";
 
 const router = Router();
 
-// ── Rate limiting: 10 requests per minute on auth routes ──────────────────────
+// ── Rate limiting: 10 requests per minute on signup/login only ────────────────
+// (/me and /logout are not limited, the frontend calls /me on every page load)
 const authLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
@@ -16,8 +17,6 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: "Too many requests, please try again later." },
 });
-
-router.use(authLimiter);
 
 // ── Validation schemas ─────────────────────────────────────────────────────────
 const signupSchema = z.object({
@@ -36,13 +35,17 @@ const COOKIE_NAME = "token";
 const COOKIE_OPTIONS = {
   httpOnly: true,
   secure: process.env.NODE_ENV === "production",
-  sameSite: "lax" as const,
+  sameSite: (process.env.NODE_ENV === "production" ? "none" : "lax") as "none" | "lax",
   maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in ms
   path: "/",
 };
 
+// clearCookie must use the same attributes but NOT maxAge
+// (Express 4 would turn the cleared cookie back into a live one)
+const { maxAge: _maxAge, ...CLEAR_COOKIE_OPTIONS } = COOKIE_OPTIONS;
+
 // ── POST /api/auth/signup ──────────────────────────────────────────────────────
-router.post("/signup", async (req: Request, res: Response, next: NextFunction) => {
+router.post("/signup", authLimiter, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const parsed = signupSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -72,7 +75,7 @@ router.post("/signup", async (req: Request, res: Response, next: NextFunction) =
 });
 
 // ── POST /api/auth/login ───────────────────────────────────────────────────────
-router.post("/login", async (req: Request, res: Response, next: NextFunction) => {
+router.post("/login", authLimiter, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const parsed = loginSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -104,7 +107,7 @@ router.post("/login", async (req: Request, res: Response, next: NextFunction) =>
 
 // ── POST /api/auth/logout ──────────────────────────────────────────────────────
 router.post("/logout", (_req: Request, res: Response) => {
-  res.clearCookie(COOKIE_NAME, { path: "/" });
+  res.clearCookie(COOKIE_NAME, CLEAR_COOKIE_OPTIONS);
   res.json({ message: "Logged out successfully." });
 });
 
@@ -128,4 +131,3 @@ router.get("/me", requireAuth, async (req: Request, res: Response, next: NextFun
 });
 
 export default router;
-
