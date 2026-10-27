@@ -13,6 +13,7 @@ import { errorHandler } from "./middleware/error";
 import { createWsServer } from "./ws/yjsHandler";
 
 const app = express();
+app.set("trust proxy", 1);
 const PORT = Number(process.env.PORT ?? 4000);
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN ?? "http://localhost:3000";
 
@@ -57,7 +58,7 @@ app.use(errorHandler);
 const server = http.createServer(app);
 createWsServer(server);
 
-server.listen(PORT, () => {
+server.listen(PORT, "0.0.0.0", () => {
   console.log(`[CollabDocs] Server running on http://localhost:${PORT}`);
   console.log(`[CollabDocs] WebSocket endpoint: ws://localhost:${PORT}/ws`);
 });
