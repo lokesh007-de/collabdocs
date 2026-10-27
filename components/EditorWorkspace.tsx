@@ -1,28 +1,27 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import {
   Activity,
   Check,
   CircleHelp,
   MessageSquare,
   MoreHorizontal,
+  PlusCircle,
+  RotateCcw,
   Send,
   ShieldCheck,
 } from "lucide-react";
-import type { WebrtcProvider } from "y-webrtc";
 import * as Y from "yjs";
 import dynamic from "next/dynamic";
 import Sidebar from "@/components/Sidebar";
 import TopBar from "@/components/TopBar";
 import PresenceAvatars from "@/components/PresenceAvatars";
 import ShareModal from "@/components/ShareModal";
-import {
-  editorCollaborators,
-  getSessionCollaborator,
-  getStoredDocuments,
-} from "@/lib/mockDocs";
+import { docsApi, versionsApi, getWsUrl, type ApiVersion } from "@/lib/api";
+import { useAuth } from "@/lib/authContext";
 
+// Dynamically import Editor to avoid SSR issues with Yjs / WebsocketProvider
 const Editor = dynamic(() => import("@/components/Editor"), { ssr: false });
 
 type Peer = { name: string; initials: string; color: string };
@@ -35,6 +34,21 @@ type CommentItem = {
   time: string;
   text: string;
 };
+
+const PEER_COLORS = [
+  "#f87171", "#34d399", "#60a5fa", "#a78bfa",
+  "#fb923c", "#4ade80", "#38bdf8", "#c084fc",
+];
+
+function colorForUser(name: string): string {
+  let hash = 0;
+  for (const ch of name) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
+  return PEER_COLORS[Math.abs(hash) % PEER_COLORS.length];
+}
+
+function initialsFor(name: string): string {
+  return name.split(" ").map((p) => p[0]).join("").slice(0, 2).toUpperCase();
+}
 
 const initialComments: CommentItem[] = [
   {
@@ -56,113 +70,153 @@ const initialComments: CommentItem[] = [
 ];
 
 export default function EditorWorkspace({ docId }: { docId: string }) {
-  const [currentUser] = useState<Peer>(() => getSessionCollaborator());
-  const [title] = useState<string>(() => {
-    const docs = getStoredDocuments();
-    const found = docs.find((item) => item.id === docId);
-    if (found) return found.title;
-    if (docId === "new") return "Untitled document";
-    return docId
-      .split("-")
-      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-      .join(" ");
-  });
+  const { user } = useAuth();
+
+  const currentUser: Peer = user
+    ? { name: user.name, initials: initialsFor(user.name), color: colorForUser(user.name) }
+    : { name: "Anonymous", initials: "AN", color: "#94a3b8" };
+
+  const [title, setTitle] = useState("Loading…");
   const [shareOpen, setShareOpen] = useState(false);
-  const [room, setRoom] = useState<{ provider: WebrtcProvider; ydoc: Y.Doc } | null>(null);
-  const [peers, setPeers] = useState<Peer[]>(editorCollaborators);
+  const [ydoc, setYdoc] = useState<Y.Doc | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [wsProvider, setWsProvider] = useState<any | null>(null);
+  const [peers, setPeers] = useState<Peer[]>([currentUser]);
   const [roomError, setRoomError] = useState("");
   const [commentList, setCommentList] = useState<CommentItem[]>(initialComments);
   const [commentInput, setCommentInput] = useState("");
+  const [versions, setVersions] = useState<ApiVersion[]>([]);
+  const [savingVersion, setSavingVersion] = useState(false);
+  const [versionMsg, setVersionMsg] = useState("");
 
+  // Load document metadata
   useEffect(() => {
-    let provider: WebrtcProvider | null = null;
-    let updatePeers: (() => void) | null = null;
-    const ydoc = new Y.Doc();
+    docsApi.get(docId)
+      .then((doc) => setTitle(doc.title))
+      .catch(() => setTitle(docId));
+  }, [docId]);
+
+  // Load version history
+  const loadVersions = useCallback(async () => {
+    try {
+      const vList = await versionsApi.list(docId);
+      setVersions(vList);
+    } catch {
+      // non-fatal
+    }
+  }, [docId]);
+
+  useEffect(() => { loadVersions(); }, [loadVersions]);
+
+  // Set up Yjs + WebsocketProvider
+  useEffect(() => {
     let active = true;
+    let provider: { destroy: () => void; awareness: { on: (e: string, cb: () => void) => void; off: (e: string, cb: () => void) => void; setLocalStateField: (k: string, v: unknown) => void; getStates: () => Map<number, Record<string, unknown>> } } | null = null;
+    const doc = new Y.Doc();
 
-    import("y-webrtc")
-      .then(({ WebrtcProvider: Provider }) => {
-        if (!active) {
-          ydoc.destroy();
-          return;
-        }
+    import("y-websocket").then(({ WebsocketProvider }) => {
+      if (!active) { doc.destroy(); return; }
 
-        const roomName = `collabdocs-${docId}`;
-        provider = new Provider(roomName, ydoc, {
-          signaling: [
-            "wss://signaling.yjs.dev",
-            "wss://y-webrtc-signaling-eu.herokuapp.com",
-            "wss://y-webrtc-signaling-us.herokuapp.com",
-          ],
-        });
+      const wsUrl = getWsUrl(docId);
+      provider = new WebsocketProvider(wsUrl, docId, doc);
 
-        // Announce current user awareness to room
-        const sessionUser = getSessionCollaborator();
-        provider.awareness.setLocalStateField("user", {
-          name: sessionUser.name,
-          color: sessionUser.color,
-        });
-
-        updatePeers = () => {
-          const live = Array.from(provider?.awareness.getStates().values() ?? []).flatMap(
-            (state) => {
-              const u = state.user;
-              if (!u || typeof u !== "object") return [];
-              const rec = u as { name?: unknown; color?: unknown };
-              if (typeof rec.name !== "string" || typeof rec.color !== "string") return [];
-              const initials = rec.name
-                .split(" ")
-                .map((part) => part[0])
-                .join("")
-                .slice(0, 2)
-                .toUpperCase();
-              return [{ name: rec.name, color: rec.color, initials }];
-            }
-          );
-          setPeers(live.length ? live : [sessionUser]);
-        };
-
-        provider.awareness.on("change", updatePeers);
-        setRoom({ provider, ydoc });
-        updatePeers();
-      })
-      .catch((error: unknown) => {
-        console.error("Unable to start collaborative room", error);
-        if (active) {
-          setRoomError("Unable to initialize real-time mesh. Working offline.");
-        }
+      // Set local awareness (name + color for cursors)
+      provider.awareness.setLocalStateField("user", {
+        name: currentUser.name,
+        color: currentUser.color,
       });
+
+      const updatePeers = () => {
+        const live = Array.from(provider!.awareness.getStates().values()).flatMap((state) => {
+          const u = (state as Record<string, unknown>).user;
+          if (!u || typeof u !== "object") return [];
+          const rec = u as { name?: unknown; color?: unknown };
+          if (typeof rec.name !== "string" || typeof rec.color !== "string") return [];
+          return [{
+            name: rec.name,
+            initials: initialsFor(rec.name),
+            color: rec.color,
+          }];
+        });
+        setPeers(live.length ? live : [currentUser]);
+      };
+
+      provider.awareness.on("change", updatePeers);
+      updatePeers();
+
+      setYdoc(doc);
+      setWsProvider(provider);
+    }).catch((err: unknown) => {
+      console.error("WebSocket provider error:", err);
+      if (active) setRoomError("Unable to connect to real-time server. Working offline.");
+    });
 
     return () => {
       active = false;
       if (provider) {
-        if (updatePeers) provider.awareness.off("change", updatePeers);
         provider.destroy();
       }
-      ydoc.destroy();
+      doc.destroy();
+      setYdoc(null);
+      setWsProvider(null);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [docId]);
 
   const handleSendComment = (e: React.FormEvent) => {
     e.preventDefault();
     if (!commentInput.trim()) return;
-
-    const newComment: CommentItem = {
-      id: `c-${Date.now()}`,
-      name: currentUser.name,
-      initials: currentUser.initials,
-      color: currentUser.color,
-      time: "Just now",
-      text: commentInput.trim(),
-    };
-
-    setCommentList((prev) => [...prev, newComment]);
+    setCommentList((prev) => [
+      ...prev,
+      {
+        id: `c-${Date.now()}`,
+        name: currentUser.name,
+        initials: currentUser.initials,
+        color: currentUser.color,
+        time: "Just now",
+        text: commentInput.trim(),
+      },
+    ]);
     setCommentInput("");
+  };
+
+  const handleSaveVersion = async () => {
+    setSavingVersion(true);
+    setVersionMsg("");
+    try {
+      await versionsApi.save(docId, `Manual save — ${new Date().toLocaleString()}`);
+      setVersionMsg("Snapshot saved ✓");
+      await loadVersions();
+    } catch {
+      setVersionMsg("Failed to save snapshot.");
+    } finally {
+      setSavingVersion(false);
+      setTimeout(() => setVersionMsg(""), 3000);
+    }
+  };
+
+  const handleRestoreVersion = async (vId: string) => {
+    if (!confirm("Restore this version? The current state will be saved first.")) return;
+    try {
+      await versionsApi.restore(docId, vId);
+      setVersionMsg("Restored! Reconnecting…");
+      // Force a full page reload so the WS reconnects with fresh state
+      window.location.reload();
+    } catch {
+      setVersionMsg("Failed to restore version.");
+    }
+  };
+
+  const handleCreateDoc = async () => {
+    try {
+      const doc = await docsApi.create("Untitled Document");
+      window.location.href = `/doc/${doc.id}`;
+    } catch { /* ignore */ }
   };
 
   return (
     <div className="flex min-h-screen bg-surface">
-      <Sidebar />
+      <Sidebar onCreateDoc={handleCreateDoc} />
       <div className="min-w-0 flex-1">
         <TopBar
           title={title}
@@ -177,14 +231,14 @@ export default function EditorWorkspace({ docId }: { docId: string }) {
           </div>
 
           <div className="mx-auto flex max-w-[1600px] justify-center px-4 py-6 md:px-8">
-            {/* Center Editorial Stage: Elevated Paper Sheet on Canvas */}
+            {/* Center Editorial Stage */}
             <section className="w-full min-w-0 max-w-[880px]">
-              {room ? (
+              {ydoc && wsProvider ? (
                 <Editor
                   docId={docId}
                   documentTitle={title}
-                  provider={room.provider}
-                  ydoc={room.ydoc}
+                  provider={wsProvider}
+                  ydoc={ydoc}
                   currentUser={currentUser}
                 />
               ) : roomError ? (
@@ -195,7 +249,7 @@ export default function EditorWorkspace({ docId }: { docId: string }) {
                 <div className="flex h-96 items-center justify-center rounded-2xl border border-outline-variant/40 bg-white shadow-docked">
                   <span className="flex items-center gap-2 text-xs text-secondary animate-pulse">
                     <span className="h-2 w-2 rounded-full bg-primary-container animate-ping" />
-                    Connecting to collaborative room...
+                    Connecting to collaborative room…
                   </span>
                 </div>
               )}
@@ -203,11 +257,11 @@ export default function EditorWorkspace({ docId }: { docId: string }) {
 
             {/* Contextual Collaboration Drawer */}
             <aside className="hidden w-[320px] shrink-0 space-y-4 pl-8 xl:block">
-              {/* Anchored Comments Panel */}
+              {/* Comments Panel */}
               <section className="overflow-hidden rounded-2xl border border-outline-variant/50 bg-white shadow-xs">
                 <header className="flex items-center justify-between border-b border-outline-variant/40 px-4 py-3 bg-surface-container-low/40">
                   <div className="flex items-center gap-2 text-xs font-semibold text-on-surface">
-                    <MessageSquare size={14} className="text-primary" /> Anchored to Block §2
+                    <MessageSquare size={14} className="text-primary" /> Comments
                   </div>
                   <MoreHorizontal size={16} className="text-secondary" />
                 </header>
@@ -225,9 +279,7 @@ export default function EditorWorkspace({ docId }: { docId: string }) {
                           <p className="text-xs font-semibold text-on-surface">{item.name}</p>
                           <span className="text-[10px] text-secondary">{item.time}</span>
                         </div>
-                        <p className="mt-1 text-xs leading-relaxed text-on-surface-variant">
-                          {item.text}
-                        </p>
+                        <p className="mt-1 text-xs leading-relaxed text-on-surface-variant">{item.text}</p>
                       </div>
                     </div>
                   ))}
@@ -266,10 +318,7 @@ export default function EditorWorkspace({ docId }: { docId: string }) {
                 </div>
                 <ul className="space-y-2.5">
                   {peers.map((peer, index) => (
-                    <li
-                      key={`${peer.name}-${index}`}
-                      className="flex items-center justify-between gap-3 text-xs"
-                    >
+                    <li key={`${peer.name}-${index}`} className="flex items-center justify-between gap-3 text-xs">
                       <span className="flex min-w-0 items-center gap-2">
                         <span
                           className="h-2 w-2 rounded-full ring-2 ring-white shrink-0"
@@ -280,32 +329,57 @@ export default function EditorWorkspace({ docId }: { docId: string }) {
                         </span>
                       </span>
                       <span className="shrink-0 text-[11px] text-secondary">
-                        {["Typing in §2", "Reviewing §3", "Selecting text", "Commenting"][index % 4]}
+                        {["Typing", "Reviewing", "Selecting", "Commenting"][index % 4]}
                       </span>
                     </li>
                   ))}
                 </ul>
               </section>
 
-              {/* Version History Card */}
+              {/* Version History Panel */}
               <section className="rounded-2xl border border-outline-variant/50 bg-white p-4 text-xs text-secondary shadow-xs">
-                <p className="flex items-center gap-2 font-semibold text-on-surface">
-                  <ShieldCheck size={14} className="text-primary" /> Version history
-                </p>
-                <div className="mt-3 space-y-2.5 border-b border-outline-variant/30 pb-3">
-                  <div className="flex justify-between items-center text-xs">
-                    <span className="font-medium text-on-surface">Current version</span>
-                    <span className="text-[11px] text-primary font-medium">Just now</span>
-                  </div>
-                  <div className="flex justify-between items-center text-xs">
-                    <span>Architecture RFC v2.3</span>
-                    <span className="text-[11px]">Yesterday</span>
-                  </div>
-                  <div className="flex justify-between items-center text-xs">
-                    <span>Initial seed draft</span>
-                    <span className="text-[11px]">Oct 12</span>
-                  </div>
+                <div className="flex items-center justify-between mb-3">
+                  <p className="flex items-center gap-2 font-semibold text-on-surface">
+                    <ShieldCheck size={14} className="text-primary" /> Version history
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleSaveVersion}
+                    disabled={savingVersion}
+                    title="Save snapshot"
+                    className="flex items-center gap-1 rounded-lg border border-outline-variant/50 px-2 py-1 text-[11px] font-medium text-primary hover:bg-primary-fixed transition-colors disabled:opacity-50"
+                  >
+                    <PlusCircle size={12} /> Save
+                  </button>
                 </div>
+
+                {versionMsg && (
+                  <p className="mb-2 text-[11px] font-medium text-emerald-600">{versionMsg}</p>
+                )}
+
+                <div className="space-y-2 max-h-[200px] overflow-y-auto">
+                  {versions.length === 0 ? (
+                    <p className="text-[11px] text-secondary/70 italic">No saved versions yet.</p>
+                  ) : (
+                    versions.map((v) => (
+                      <div key={v.id} className="flex items-center justify-between gap-2 text-xs py-1 border-b border-outline-variant/20 last:border-0">
+                        <div className="min-w-0">
+                          <p className="truncate font-medium text-on-surface">{v.label ?? "Snapshot"}</p>
+                          <p className="text-[10px] text-secondary">{new Date(v.createdAt).toLocaleString()}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleRestoreVersion(v.id)}
+                          title="Restore this version"
+                          className="shrink-0 rounded-lg p-1 text-secondary hover:text-primary hover:bg-primary-fixed transition-colors"
+                        >
+                          <RotateCcw size={13} />
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+
                 <p className="mt-3 flex items-center gap-1.5 text-xs text-primary font-medium">
                   <Check size={13} className="text-emerald-500" /> Live auto-save active{" "}
                   <CircleHelp size={13} className="ml-auto text-secondary/60" />
@@ -320,6 +394,7 @@ export default function EditorWorkspace({ docId }: { docId: string }) {
         open={shareOpen}
         onClose={() => setShareOpen(false)}
         documentTitle={title}
+        docId={docId}
       />
     </div>
   );

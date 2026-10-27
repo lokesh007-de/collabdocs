@@ -1,0 +1,12 @@
+# Environment Variables
+.env
+
+# Build output
+dist/
+
+# Dependencies
+node_modules/
+
+# Prisma generated
+prisma/migrations/
+

@@ -1,0 +1,69 @@
+// Prisma schema for CollabDocs
+// Uses Supabase PostgreSQL with connection pooling (pgbouncer) for DATABASE_URL
+// and a direct connection for migrations (DIRECT_URL).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  ownedDocuments Document[]
+  collaborations Collaborator[]
+}
+
+model Document {
+  id        String   @id @default(cuid())
+  title     String   @default("Untitled Document")
+  ownerId   String
+  yjsState  Bytes?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  owner         User           @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  collaborators Collaborator[]
+  versions      Version[]
+}
+
+model Collaborator {
+  docId  String
+  userId String
+  role   Role   @default(VIEWER)
+
+  // Relations
+  document Document @relation(fields: [docId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([docId, userId])
+}
+
+enum Role {
+  VIEWER
+  EDITOR
+}
+
+model Version {
+  id        String   @id @default(cuid())
+  docId     String
+  snapshot  Bytes
+  label     String?
+  createdAt DateTime @default(now())
+
+  // Relations
+  document Document @relation(fields: [docId], references: [id], onDelete: Cascade)
+}
+

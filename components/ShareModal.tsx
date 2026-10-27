@@ -1,40 +1,109 @@
 "use client";
 
-import { useState } from "react";
-import { Check, Globe2, Link2, Mail, X } from "lucide-react";
+import { useEffect, useState, useCallback } from "react";
+import { Check, Globe2, Link2, Mail, Trash2, X } from "lucide-react";
+import { shareApi, ApiError } from "@/lib/api";
 
-type CollaboratorAccess = {
+type CollaboratorItem = {
+  userId: string;
   initials: string;
   name: string;
   email: string;
-  role: string;
+  role: "Owner" | "EDITOR" | "VIEWER";
   color: string;
+  isOwner?: boolean;
 };
 
-const initialPeople: CollaboratorAccess[] = [
-  { initials: "AR", name: "Alex Rivera (You)", email: "alex@company.com", role: "Owner", color: "#4f46e5" },
-  { initials: "RS", name: "Rahul S.", email: "rahul@company.com", role: "Editor", color: "#f87171" },
-  { initials: "PK", name: "Priya Kapoor", email: "priya@company.com", role: "Commenter", color: "#2563eb" },
-  { initials: "EC", name: "Elena Chen", email: "elena@company.com", role: "Viewer", color: "#10b981" },
-  { initials: "ML", name: "Maya Lin", email: "maya@company.com", role: "Editor", color: "#8b5cf6" },
+const PEER_COLORS = [
+  "#4f46e5",
+  "#f87171",
+  "#2563eb",
+  "#10b981",
+  "#8b5cf6",
+  "#f59e0b",
+  "#ec4899",
 ];
+
+function colorFor(str: string): string {
+  let hash = 0;
+  for (const ch of str) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
+  return PEER_COLORS[Math.abs(hash) % PEER_COLORS.length];
+}
+
+function getInitials(name: string, email: string): string {
+  const source = name.trim() || email.split("@")[0];
+  const parts = source.split(/[ ._-]/).filter(Boolean);
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  return source.slice(0, 2).toUpperCase() || "CO";
+}
 
 export default function ShareModal({
   open,
   onClose,
   documentTitle,
+  docId,
 }: {
   open: boolean;
   onClose: () => void;
   documentTitle: string;
+  docId?: string;
 }) {
   const [email, setEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState("Editor");
-  const [people, setPeople] = useState<CollaboratorAccess[]>(initialPeople);
+  const [inviteRole, setInviteRole] = useState<"EDITOR" | "VIEWER">("EDITOR");
+  const [people, setPeople] = useState<CollaboratorItem[]>([]);
+  const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [publicAccess, setPublicAccess] = useState(false);
   const [publicRole, setPublicRole] = useState("Viewer");
   const [statusMessage, setStatusMessage] = useState("");
+  const [errorMessage, setErrorMessage] = useState("");
+
+  const loadCollaborators = useCallback(async () => {
+    if (!docId) return;
+    try {
+      setLoading(true);
+      const data = await shareApi.list(docId);
+      const list: CollaboratorItem[] = [];
+
+      if (data.owner) {
+        list.push({
+          userId: data.owner.id,
+          name: `${data.owner.name} (Owner)`,
+          email: data.owner.email,
+          initials: getInitials(data.owner.name, data.owner.email),
+          role: "Owner",
+          color: colorFor(data.owner.email),
+          isOwner: true,
+        });
+      }
+
+      for (const item of data.collaborators) {
+        list.push({
+          userId: item.user.id,
+          name: item.user.name,
+          email: item.user.email,
+          initials: getInitials(item.user.name, item.user.email),
+          role: item.role,
+          color: colorFor(item.user.email),
+          isOwner: false,
+        });
+      }
+
+      setPeople(list);
+    } catch {
+      // Fallback or silently handle if doc not in server yet
+    } finally {
+      setLoading(false);
+    }
+  }, [docId]);
+
+  useEffect(() => {
+    if (open && docId) {
+      loadCollaborators();
+    }
+  }, [open, docId, loadCollaborators]);
 
   if (!open) return null;
 
@@ -54,35 +123,96 @@ export default function ShareModal({
     }
   }
 
-  function handleInvite(e: React.FormEvent) {
+  async function handleInvite(e: React.FormEvent) {
     e.preventDefault();
-    if (!email || !email.includes("@")) return;
+    setErrorMessage("");
+    setStatusMessage("");
 
-    const initials = email
-      .split("@")[0]
-      .split(/[._-]/)
-      .map((p) => p[0]?.toUpperCase() ?? "")
-      .join("")
-      .slice(0, 2) || "CO";
+    if (!email || !email.includes("@")) {
+      setErrorMessage("Please enter a valid email address.");
+      return;
+    }
 
-    const newPerson: CollaboratorAccess = {
-      initials,
-      name: email.split("@")[0],
-      email,
-      role: inviteRole,
-      color: "#60a5fa",
-    };
+    if (!docId) {
+      // Local fallback
+      const initials = getInitials("", email);
+      setPeople((prev) => [
+        ...prev,
+        {
+          userId: `local-${Date.now()}`,
+          initials,
+          name: email.split("@")[0],
+          email,
+          role: inviteRole,
+          color: colorFor(email),
+        },
+      ]);
+      setEmail("");
+      setStatusMessage(`Invitation sent to ${email}!`);
+      setTimeout(() => setStatusMessage(""), 3000);
+      return;
+    }
 
-    setPeople((prev) => [...prev, newPerson]);
-    setEmail("");
-    setStatusMessage(`Invitation sent to ${email}!`);
-    setTimeout(() => setStatusMessage(""), 3000);
+    try {
+      await shareApi.invite(docId, email, inviteRole);
+      setEmail("");
+      setStatusMessage(`Invitation sent to ${email}!`);
+      setTimeout(() => setStatusMessage(""), 3000);
+      await loadCollaborators();
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setErrorMessage(err.message);
+      } else {
+        setErrorMessage("Failed to invite collaborator.");
+      }
+    }
   }
 
-  function updateRole(targetEmail: string, newRole: string) {
-    setPeople((prev) =>
-      prev.map((p) => (p.email === targetEmail ? { ...p, role: newRole } : p))
-    );
+  async function handleUpdateRole(targetUserId: string, newRole: string) {
+    if (!docId) {
+      setPeople((prev) =>
+        prev.map((p) =>
+          p.userId === targetUserId ? { ...p, role: newRole as "EDITOR" | "VIEWER" } : p
+        )
+      );
+      return;
+    }
+
+    setErrorMessage("");
+    setStatusMessage("");
+
+    if (newRole === "REMOVE") {
+      try {
+        await shareApi.remove(docId, targetUserId);
+        setPeople((prev) => prev.filter((p) => p.userId !== targetUserId));
+        setStatusMessage("Collaborator removed.");
+        setTimeout(() => setStatusMessage(""), 3000);
+      } catch (err) {
+        if (err instanceof ApiError) {
+          setErrorMessage(err.message);
+        } else {
+          setErrorMessage("Failed to remove collaborator.");
+        }
+      }
+      return;
+    }
+
+    try {
+      await shareApi.updateRole(docId, targetUserId, newRole as "EDITOR" | "VIEWER");
+      setPeople((prev) =>
+        prev.map((p) =>
+          p.userId === targetUserId ? { ...p, role: newRole as "EDITOR" | "VIEWER" } : p
+        )
+      );
+      setStatusMessage("Role updated.");
+      setTimeout(() => setStatusMessage(""), 3000);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setErrorMessage(err.message);
+      } else {
+        setErrorMessage("Failed to update role.");
+      }
+    }
   }
 
   return (
@@ -138,19 +268,18 @@ export default function ShareModal({
                 type="email"
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
-                placeholder="Add people by name or email..."
+                placeholder="Add people by registered email..."
                 className="h-10 min-w-0 flex-1 bg-transparent text-xs outline-none"
               />
             </div>
             <select
               aria-label="Invite permission"
               value={inviteRole}
-              onChange={(e) => setInviteRole(e.target.value)}
+              onChange={(e) => setInviteRole(e.target.value as "EDITOR" | "VIEWER")}
               className="rounded-xl border border-outline-variant/70 bg-white px-3 text-xs font-medium text-on-surface outline-none hover:bg-surface-container-low"
             >
-              <option value="Editor">Editor</option>
-              <option value="Commenter">Commenter</option>
-              <option value="Viewer">Viewer</option>
+              <option value="EDITOR">Editor</option>
+              <option value="VIEWER">Viewer</option>
             </select>
             <button
               type="submit"
@@ -161,16 +290,24 @@ export default function ShareModal({
             </button>
           </form>
 
+          {errorMessage && (
+            <p role="alert" className="mt-2 text-xs font-medium text-red-500">
+              {errorMessage}
+            </p>
+          )}
+
           <div className="mt-6 flex items-center justify-between">
             <p className="text-[11px] font-semibold uppercase tracking-wider text-secondary">
               People with access
             </p>
-            <span className="text-xs text-secondary">{people.length} collaborators</span>
+            <span className="text-xs text-secondary">
+              {loading ? "Loading…" : `${people.length} collaborator${people.length === 1 ? "" : "s"}`}
+            </span>
           </div>
 
           <div className="mt-2.5 max-h-[220px] overflow-y-auto divide-y divide-outline-variant/20 pr-1">
             {people.map((person) => (
-              <div key={person.email} className="flex items-center gap-3 py-2.5">
+              <div key={person.userId || person.email} className="flex items-center gap-3 py-2.5">
                 <span
                   className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-[10px] font-bold text-white shadow-xs"
                   style={{ backgroundColor: person.color }}
@@ -185,21 +322,31 @@ export default function ShareModal({
                     {person.email}
                   </p>
                 </div>
-                {person.role === "Owner" ? (
+                {person.isOwner || person.role === "Owner" ? (
                   <span className="rounded-md bg-surface-container px-2 py-1 text-[11px] font-medium text-secondary">
                     Owner
                   </span>
                 ) : (
-                  <select
-                    aria-label={`Permission for ${person.name}`}
-                    value={person.role}
-                    onChange={(e) => updateRole(person.email, e.target.value)}
-                    className="rounded-lg border border-outline-variant/50 bg-white px-2 py-1 text-xs font-medium text-on-surface outline-none hover:bg-surface-container-low"
-                  >
-                    <option value="Editor">Editor</option>
-                    <option value="Commenter">Commenter</option>
-                    <option value="Viewer">Viewer</option>
-                  </select>
+                  <div className="flex items-center gap-1.5">
+                    <select
+                      aria-label={`Permission for ${person.name}`}
+                      value={person.role}
+                      onChange={(e) => handleUpdateRole(person.userId, e.target.value)}
+                      className="rounded-lg border border-outline-variant/50 bg-white px-2 py-1 text-xs font-medium text-on-surface outline-none hover:bg-surface-container-low"
+                    >
+                      <option value="EDITOR">Editor</option>
+                      <option value="VIEWER">Viewer</option>
+                      <option value="REMOVE">Remove</option>
+                    </select>
+                    <button
+                      type="button"
+                      title="Remove access"
+                      onClick={() => handleUpdateRole(person.userId, "REMOVE")}
+                      className="rounded p-1 text-secondary hover:text-red-600 transition-colors"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
                 )}
               </div>
             ))}
@@ -246,7 +393,6 @@ export default function ShareModal({
                   className="rounded-lg border border-outline-variant/60 bg-white px-2 py-1 text-xs font-medium text-on-surface outline-none"
                 >
                   <option value="Viewer">Viewer</option>
-                  <option value="Commenter">Commenter</option>
                   <option value="Editor">Editor</option>
                 </select>
               )}

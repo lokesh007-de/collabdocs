@@ -7,7 +7,6 @@ import Collaboration from "@tiptap/extension-collaboration";
 import CollaborationCursor from "@tiptap/extension-collaboration-cursor";
 import Underline from "@tiptap/extension-underline";
 import Link from "@tiptap/extension-link";
-import type { WebrtcProvider } from "y-webrtc";
 import type { Doc } from "yjs";
 import Toolbar from "@/components/Toolbar";
 
@@ -33,7 +32,8 @@ export default function Editor({
 }: {
   docId: string;
   documentTitle: string;
-  provider: WebrtcProvider;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  provider: any;
   ydoc: Doc;
   currentUser: { name: string; color: string };
 }) {

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import {
   FileText,
   FolderOpen,
@@ -14,7 +14,6 @@ import {
   Users,
   Zap,
 } from "lucide-react";
-import { createNewDocument } from "@/lib/mockDocs";
 
 const primaryLinks = [
   { label: "My Documents", href: "/dashboard", icon: FileText },
@@ -23,14 +22,12 @@ const primaryLinks = [
   { label: "Trash", href: "/dashboard?view=trash", icon: Trash2 },
 ];
 
-export default function Sidebar() {
-  const pathname = usePathname();
-  const router = useRouter();
+interface SidebarProps {
+  onCreateDoc?: () => void;
+}
 
-  const handleCreateDocument = () => {
-    const newDoc = createNewDocument("Untitled document", "Draft");
-    router.push(`/doc/${newDoc.id}`);
-  };
+export default function Sidebar({ onCreateDoc }: SidebarProps) {
+  const pathname = usePathname();
 
   return (
     <aside className="hidden min-h-screen w-[268px] shrink-0 flex-col border-r border-outline-variant/40 bg-white md:flex">
@@ -44,7 +41,7 @@ export default function Sidebar() {
       <div className="px-4 mb-5">
         <button
           type="button"
-          onClick={handleCreateDocument}
+          onClick={onCreateDoc}
           className="flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-primary-container text-sm font-semibold text-white shadow-sm transition hover:bg-primary active:scale-[0.99]"
         >
           <Plus size={17} /> New Document
@@ -80,10 +77,10 @@ export default function Sidebar() {
         </p>
         <nav className="space-y-1">
           <Link
-            href="/doc/q3-product-architecture"
+            href="/dashboard"
             className="flex items-center gap-3 rounded-xl px-3 py-2 text-sm text-on-surface-variant hover:bg-surface-container-low hover:text-on-surface transition-colors"
           >
-            <FolderOpen size={16} /> Editor Workspace
+            <FolderOpen size={16} /> My Workspace
           </Link>
           <Link
             href="/dashboard?view=templates"
@@ -113,19 +110,6 @@ export default function Sidebar() {
         >
           <Settings size={16} /> Settings
         </Link>
-        <div className="mt-3 flex items-center justify-between border-t border-outline-variant/40 pt-3 px-2">
-          <div className="flex items-center gap-2.5">
-            <span className="grid h-8 w-8 place-items-center rounded-full bg-primary-fixed text-xs font-bold text-primary">
-              AR
-            </span>
-            <div>
-              <p className="text-xs font-semibold text-on-surface leading-tight">Alex Rivera</p>
-              <p className="flex items-center gap-1 text-[11px] text-secondary">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> Online
-              </p>
-            </div>
-          </div>
-        </div>
       </div>
     </aside>
   );
