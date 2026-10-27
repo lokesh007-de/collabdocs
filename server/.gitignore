@@ -7,6 +7,5 @@ dist/
 # Dependencies
 node_modules/
 
-# Prisma generated
-prisma/migrations/
+
 
