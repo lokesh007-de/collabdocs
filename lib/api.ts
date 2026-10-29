@@ -3,7 +3,7 @@
  * All requests include credentials (httpOnly JWT cookie).
  */
 
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 // ── Generic fetch wrapper ──────────────────────────────────────────────────────
 async function apiFetch<T>(
